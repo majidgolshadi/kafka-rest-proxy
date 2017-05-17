@@ -1,4 +1,4 @@
-package main
+package producer
 
 import (
 	"github.com/Shopify/sarama"
@@ -14,16 +14,34 @@ import (
 
 
 type RestProxy struct {
-	DataCollector     sarama.SyncProducer
-	AccessLogProducer sarama.AsyncProducer
+	RetryConnecting int
+	FlushFrequency time.Duration
+	LogTopic string
+
+	brokerList []string
+	addr string
+
+	dataCollector     sarama.SyncProducer
+	accessLogProducer sarama.AsyncProducer
+}
+
+func New(brokerList []string) *RestProxy {
+	s := &RestProxy{}
+
+	s.RetryConnecting = 10
+	s.FlushFrequency = 500
+	s.LogTopic = "kafka_producer_access_log"
+	s.brokerList = brokerList
+
+	return s
 }
 
 func (s *RestProxy) Close() error {
-	if err := s.DataCollector.Close(); err != nil {
+	if err := s.dataCollector.Close(); err != nil {
 		log.Println("Failed to shut down data collector cleanly", err)
 	}
 
-	if err := s.AccessLogProducer.Close(); err != nil {
+	if err := s.accessLogProducer.Close(); err != nil {
 		log.Println("Failed to shut down access log producer cleanly", err)
 	}
 
@@ -35,6 +53,11 @@ func (s *RestProxy) Handler() http.Handler {
 }
 
 func (s *RestProxy) Run(addr string) error {
+
+	s.addr = addr
+	s.dataCollector = newDataCollector(s.brokerList, s.RetryConnecting)
+	s.accessLogProducer = newAccessLogProducer(s.brokerList,s.FlushFrequency)
+
 	httpServer := &http.Server{
 		Addr:    addr,
 		Handler: s.Handler(),
@@ -42,6 +65,15 @@ func (s *RestProxy) Run(addr string) error {
 
 	log.Printf("Listening for requests on %s...\n", addr)
 	return httpServer.ListenAndServe()
+}
+
+func (s *RestProxy) Restart(brokers []string) error {
+
+	err := s.Close(); if err != nil {
+		return err
+	}
+
+	return s.Run(s.addr)
 }
 
 func (s *RestProxy) collectQueryStringData() http.Handler {
@@ -53,7 +85,7 @@ func (s *RestProxy) collectQueryStringData() http.Handler {
 
 		uriArray := strings.Split(r.RequestURI, "/")
 		body, err := ioutil.ReadAll(r.Body);
-		partition, offset, err := s.DataCollector.SendMessage(&sarama.ProducerMessage{
+		partition, offset, err := s.dataCollector.SendMessage(&sarama.ProducerMessage{
 			Topic: uriArray[len(uriArray) - 1],
 			Value: sarama.StringEncoder(body),
 		})
@@ -82,8 +114,8 @@ func (s *RestProxy) withAccessLog(next http.Handler) http.Handler {
 			ResponseTime: float64(time.Since(started)) / float64(time.Second),
 		}
 
-		s.AccessLogProducer.Input() <- &sarama.ProducerMessage{
-			Topic: *logTopic,
+		s.accessLogProducer.Input() <- &sarama.ProducerMessage{
+			Topic: s.LogTopic,
 			Value: entry,
 		}
 	})
@@ -116,11 +148,11 @@ func (ale *accessLogEntry) Encode() ([]byte, error) {
 	return ale.encoded, ale.err
 }
 
-func newDataCollector(brokerList []string) sarama.SyncProducer {
+func newDataCollector(brokerList []string, retry int) sarama.SyncProducer {
 
 	config := sarama.NewConfig()
 	config.Producer.RequiredAcks = sarama.WaitForLocal
-	config.Producer.Retry.Max = *retry
+	config.Producer.Retry.Max = retry
 
 	producer, err := sarama.NewSyncProducer(brokerList, config)
 	if err != nil {
@@ -130,12 +162,12 @@ func newDataCollector(brokerList []string) sarama.SyncProducer {
 	return producer
 }
 
-func newAccessLogProducer(brokerList []string) sarama.AsyncProducer {
+func newAccessLogProducer(brokerList []string, flushFrequency time.Duration) sarama.AsyncProducer {
 
 	config := sarama.NewConfig()
 	config.Producer.RequiredAcks = sarama.WaitForLocal       // Only wait for the leader to ack
-	config.Producer.Compression = sarama.CompressionSnappy
-	config.Producer.Flush.Frequency = 500 * time.Millisecond
+	config.Producer.Compression = sarama.CompressionNone
+	config.Producer.Flush.Frequency = flushFrequency * time.Millisecond
 
 	producer, err := sarama.NewAsyncProducer(brokerList, config)
 	if err != nil {
