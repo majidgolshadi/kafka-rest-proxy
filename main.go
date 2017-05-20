@@ -11,14 +11,15 @@ import (
 	"encoding/json"
 
 	"github.com/Shopify/sarama"
-	"github.com/majidgolshadi/ejabberd-to-kafka-producer/producer"
+	"github.com/majidgolshadi/kafka-rest-proxy/producer"
 	"github.com/samuel/go-zookeeper/zk"
 )
 
 var (
-	addr      = flag.String("addr", ":8080", "The address to bind to")
+	addr      = flag.String("addr", "192.168.1.101:8080", "The address to bind to")
+	proId     = flag.String("proId", "/kafka_producer/", "Zookeeper namespace to producer register itself in")
 	retry	  = flag.Int("retry", 10, "Retry up to N times to produce the message")
-	zookeeper = flag.String("zookeeper", "192.168.120.81:2181,192.168.120.82:2181,192.168.120.83:2181/kafka", "The Kafka brokers to connect to, as a comma separated list")
+	zookeeper = flag.String("zookeeper", "192.168.1.101:2181", "The Kafka brokers to connect to, as a comma separated list")
 	logTopic  = flag.String("logtopic", "kafka_producer_access_log", "kafka topic to produce log in")
 	verbose   = flag.Bool("verbose", false, "Turn on Sarama logging")
 )
@@ -38,18 +39,15 @@ func main() {
 
 	zkServer := strings.Split(*zookeeper, "/")[0]
 	rootNamespace := strings.Replace(*zookeeper, zkServer, "", 1)
-	if rootNamespace == "" {
-		rootNamespace = "/"
-	}
 
-	zkConn, ech, err := zk.Connect(strings.Split(zkServer, ","), 10 * time.Second)
+	zkConn, _, err := zk.Connect(strings.Split(zkServer, ","), 10 * time.Second)
 	if err != nil {
 		println(err.Error())
 		return
 	}
 
 	defer zkConn.Close()
-
+	RegisterProducer(zkConn, *proId, *addr)
 	brokers, err := GetBrokers(zkConn, rootNamespace)
 
 	server := producer.New(brokers)
@@ -61,17 +59,23 @@ func main() {
 			log.Println("Failed to close server", err)
 		}
 	}()
+
+	go func() {
+		_, _, brokerWatch, _ := zkConn.ChildrenW(fmt.Sprintf("%s/brokers/ids", rootNamespace))
+		for true {
+			select {
+			case event := <-brokerWatch:
+				_, _, brokerWatch, _ = zkConn.ChildrenW(fmt.Sprintf("%s/brokers/ids", rootNamespace))
+				log.Println("Restart kafka connections")
+				println(event.Path)
+				br, _ := GetBrokers(zkConn, rootNamespace)
+				fmt.Printf("brokers: %v", br)
+				server.Restart(br)
+			}
+		}
+	}()
+
 	log.Fatal(server.Run(*addr))
-
-	_, _, brokerWatch, _ := zkConn.ChildrenW(fmt.Sprintf("%s/brokers/ids", rootNamespace))
-
-	select {
-
-	case <- ech:
-	case <- brokerWatch:
-		br, _ := GetBrokers(zkConn, rootNamespace)
-		server.Restart(br)
-	}
 }
 
 func GetBrokers (zkConn *zk.Conn, chRoot string) (brokers []string, err error) {
@@ -102,4 +106,12 @@ func GetBrokers (zkConn *zk.Conn, chRoot string) (brokers []string, err error) {
 	}
 
 	return
+}
+
+func RegisterProducer(zkConn *zk.Conn, namespace string, advertiseIP string) {
+	zkConn.Create(
+		namespace,
+		[]byte(advertiseIP),
+		int32(zk.FlagEphemeral|zk.FlagSequence),
+		zk.WorldACL(zk.PermAll))
 }
