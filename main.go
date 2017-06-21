@@ -16,10 +16,10 @@ import (
 )
 
 var (
-	addr      = flag.String("addr", "192.168.1.101:8080", "The address to bind to")
+	addr      = flag.String("addr", "", "The address to bind to example 192.168.1.101:8080")
 	proId     = flag.String("proId", "/kafka_producer/", "Zookeeper namespace to producer register itself in")
 	retry	  = flag.Int("retry", 10, "Retry up to N times to produce the message")
-	zookeeper = flag.String("zookeeper", "192.168.1.101:2181", "The Kafka brokers to connect to, as a comma separated list")
+	zookeeper = flag.String("zookeeper", "", "The Kafka brokers to connect to, as a comma separated list example: 192.168.1.101:2181,...")
 	logTopic  = flag.String("logtopic", "kafka_producer_access_log", "kafka topic to produce log in")
 	verbose   = flag.Bool("verbose", false, "Turn on Sarama logging")
 )
@@ -32,7 +32,7 @@ func main() {
 		sarama.Logger = log.New(os.Stdout, "[sarama] ", log.LstdFlags)
 	}
 
-	if *zookeeper == "" {
+	if *zookeeper == "" || *addr == "" {
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
