@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 
 	"github.com/Shopify/sarama"
-	"github.com/majidgolshadi/kafka-rest-proxy/producer"
 	"github.com/samuel/go-zookeeper/zk"
 )
 
@@ -50,7 +49,7 @@ func main() {
 	RegisterProducer(zkConn, *proId, *addr)
 	brokers, err := GetBrokers(zkConn, rootNamespace)
 
-	server := producer.New(brokers)
+	server := NewRestProxy(brokers)
 	server.LogTopic = *logTopic
 	server.RetryConnecting = *retry
 	log.Printf("Kafka brokers: %s", strings.Join(brokers, ", "))

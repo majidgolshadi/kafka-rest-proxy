@@ -1,4 +1,4 @@
-package producer
+package main
 
 import (
 	"github.com/Shopify/sarama"
@@ -25,7 +25,7 @@ type RestProxy struct {
 	accessLogProducer sarama.AsyncProducer
 }
 
-func New(brokerList []string) *RestProxy {
+func NewRestProxy(brokerList []string) *RestProxy {
 	s := &RestProxy{}
 
 	s.RetryConnecting = 10
