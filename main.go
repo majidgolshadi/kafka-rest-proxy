@@ -19,7 +19,6 @@ var (
 	proId     = flag.String("proId", "/kafka_producer/", "Zookeeper namespace to producer register itself in")
 	retry	  = flag.Int("retry", 10, "Retry up to N times to produce the message")
 	zookeeper = flag.String("zookeeper", "", "The Kafka brokers to connect to, as a comma separated list example: 192.168.1.101:2181,...")
-	logTopic  = flag.String("logtopic", "kafka_producer_access_log", "kafka topic to produce log in")
 	verbose   = flag.Bool("verbose", false, "Turn on Sarama logging")
 )
 
@@ -50,14 +49,9 @@ func main() {
 	brokers, err := GetBrokers(zkConn, rootNamespace)
 
 	server := NewRestProxy(brokers)
-	server.LogTopic = *logTopic
 	server.RetryConnecting = *retry
 	log.Printf("Kafka brokers: %s", strings.Join(brokers, ", "))
-	defer func() {
-		if err := server.Close(); err != nil {
-			log.Println("Failed to close server", err)
-		}
-	}()
+	defer server.Close()
 
 	go func() {
 		_, _, brokerWatch, _ := zkConn.ChildrenW(fmt.Sprintf("%s/brokers/ids", rootNamespace))
