@@ -1,110 +1,139 @@
 package main
 
 import (
-	"os"
-	"flag"
-	"strings"
-	"log"
-	"time"
 	"fmt"
-	"path"
-	"encoding/json"
-
-	"github.com/Shopify/sarama"
-	"github.com/samuel/go-zookeeper/zk"
+	"github.com/BurntSushi/toml"
+	log "github.com/sirupsen/logrus"
+	"net/http"
+	_ "net/http/pprof"
+	"os"
 )
 
-var (
-	addr      = flag.String("addr", "", "The address to bind to example 192.168.1.101:8080")
-	proId     = flag.String("proId", "/kafka_producer/", "Zookeeper namespace to producer register itself in")
-	retry	  = flag.Int("retry", 10, "Retry up to N times to produce the message")
-	zookeeper = flag.String("zookeeper", "", "The Kafka brokers to connect to, as a comma separated list example: 192.168.1.101:2181,...")
-	verbose   = flag.Bool("verbose", false, "Turn on Sarama logging")
-)
+type config struct {
+	AdvertisedListener string `toml:"advertised_listener"`
+	DebugPort          string `toml:"debug_port"`
+	Log                Log
+	KafkaProducer      KafkaProducer `toml:"kafka-producer"`
+}
 
+type Log struct {
+	Format   string `toml:"format"`
+	LogLevel string `toml:"log_level"`
+	LogPoint string `toml:"log_point"`
+}
+
+type KafkaProducer struct {
+	Zookeeper                     string `toml:"zookeeper"`
+	ZookeeperTimeout              int    `toml:"zookeeper_timeout"`
+	ProducerRegistrationNamespace string `toml:"producer_registration_namespace"`
+	MaxRetries                    int    `toml:"max_retries"`
+}
+
+func (cnf *config) init() {
+	if cnf.AdvertisedListener == "" {
+		cnf.AdvertisedListener = "0.0.0.0:8080"
+	}
+
+	if cnf.DebugPort == "" {
+		cnf.DebugPort = ":6060"
+	}
+
+	if cnf.Log.Format == "" {
+		cnf.Log.Format = "json"
+	}
+
+	if cnf.Log.LogLevel == "" {
+		cnf.Log.LogLevel = "info"
+	}
+
+	if cnf.KafkaProducer.MaxRetries < 1 {
+		cnf.KafkaProducer.MaxRetries = 10
+	}
+
+	if cnf.KafkaProducer.ProducerRegistrationNamespace == "" {
+		cnf.KafkaProducer.ProducerRegistrationNamespace = "/kafka_producer/"
+	}
+}
 
 func main() {
-	flag.Parse()
+	var cnf config
+	var err error
 
-	if *verbose {
-		sarama.Logger = log.New(os.Stdout, "[sarama] ", log.LstdFlags)
+	if _, err := toml.DecodeFile("config.toml", &cnf); err != nil {
+		log.Fatal("read configuration file error ", err.Error())
 	}
 
-	if *zookeeper == "" || *addr == "" {
-		flag.PrintDefaults()
-		os.Exit(1)
-	}
-
-	zkServer := strings.Split(*zookeeper, "/")[0]
-	rootNamespace := strings.Replace(*zookeeper, zkServer, "", 1)
-
-	zkConn, _, err := zk.Connect(strings.Split(zkServer, ","), 10 * time.Second)
-	if err != nil {
-		println(err.Error())
-		return
-	}
-
-	defer zkConn.Close()
-	RegisterProducer(zkConn, *proId, *addr)
-	brokers, err := GetBrokers(zkConn, rootNamespace)
-
-	server := NewRestProxy(brokers)
-	server.RetryConnecting = *retry
-	log.Printf("Kafka brokers: %s", strings.Join(brokers, ", "))
-	defer server.Close()
+	initLogService(cnf.Log)
 
 	go func() {
-		_, _, brokerWatch, _ := zkConn.ChildrenW(fmt.Sprintf("%s/brokers/ids", rootNamespace))
-		for true {
-			select {
-			case event := <-brokerWatch:
-				_, _, brokerWatch, _ = zkConn.ChildrenW(fmt.Sprintf("%s/brokers/ids", rootNamespace))
-				log.Println("Restart kafka connections")
-				println(event.Path)
-				br, _ := GetBrokers(zkConn, rootNamespace)
-				fmt.Printf("brokers: %v", br)
-				server.Restart(br)
-			}
+		log.Info(fmt.Sprintf("debugging server listening on port %s", cnf.DebugPort))
+		http.ListenAndServe(cnf.DebugPort, nil)
+	}()
+
+	zk := &Zookeeper{
+		Address:     cnf.KafkaProducer.Zookeeper,
+		ConnTimeout: cnf.KafkaProducer.ZookeeperTimeout,
+	}
+
+	if err := zk.Connect(); err != nil {
+		log.WithField("error", err.Error()).Fatal("connection to zookeeper error")
+	}
+
+	defer zk.Close()
+
+	zk.registerProducer(cnf.KafkaProducer.ProducerRegistrationNamespace, cnf.AdvertisedListener)
+
+	brokers, err := zk.getBrokers()
+	if err != nil {
+		log.WithField("error", err.Error()).Fatal("failed to fetch brokers")
+	}
+
+	restProxy, err := NewRestProxy(&RestProxyOpt{
+		Brokers:            brokers,
+		AdvertisedListener: cnf.AdvertisedListener,
+		RetryConnecting:    cnf.KafkaProducer.MaxRetries,
+	})
+
+	if err != nil {
+		log.WithField("error", err.Error()).Fatal("failed to create http proxy")
+	}
+
+	defer restProxy.Close()
+
+	go func() {
+		for br := range zk.WatchOnKafkaNodeCluster() {
+			restProxy.Restart(br)
 		}
 	}()
 
-	log.Fatal(server.Run(*addr))
+	log.Fatal(restProxy.Listen().Error())
 }
 
-func GetBrokers (zkConn *zk.Conn, chRoot string) (brokers []string, err error) {
-	var children []string
-	root := fmt.Sprintf("%s/brokers/ids", chRoot)
-	children, _, err = zkConn.Children(root)
-	if err != nil {
-		return
+func initLogService(logConfig Log) {
+	switch logConfig.LogLevel {
+	case "debug":
+		log.SetLevel(log.DebugLevel)
+	case "info":
+		log.SetLevel(log.InfoLevel)
+	case "error":
+		log.SetLevel(log.ErrorLevel)
+	default:
+		log.SetLevel(log.WarnLevel)
 	}
 
-	type brokerEntry struct {
-		Host string `json:"host"`
-		Port int    `json:"port"`
+	switch logConfig.Format {
+	case "json":
+		log.SetFormatter(&log.JSONFormatter{})
+	default:
+		log.SetFormatter(&log.TextFormatter{})
 	}
 
-	for _, child := range children {
-		value, _, err := zkConn.Get(path.Join(root, child))
+	if logConfig.LogPoint != "" {
+		f, err := os.Create(logConfig.LogPoint)
 		if err != nil {
-			return nil, err
+			log.Fatal("create log file error: ", err.Error())
 		}
 
-		var brokerNode brokerEntry
-		if err := json.Unmarshal(value, &brokerNode); err != nil {
-			return nil, err
-		}
-
-		brokers = append(brokers, fmt.Sprintf("%s:%d", brokerNode.Host, brokerNode.Port))
+		log.SetOutput(f)
 	}
-
-	return
-}
-
-func RegisterProducer(zkConn *zk.Conn, namespace string, advertiseIP string) {
-	zkConn.Create(
-		namespace,
-		[]byte(advertiseIP),
-		int32(zk.FlagEphemeral|zk.FlagSequence),
-		zk.WorldACL(zk.PermAll))
 }

@@ -31,3 +31,4 @@ _testmain.go
 # external packages folder
 vendor/
 kafka-http-proxy
+config.toml

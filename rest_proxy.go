@@ -1,66 +1,86 @@
 package main
 
 import (
-	"github.com/Shopify/sarama"
+	"errors"
 	"fmt"
-	"log"
+	"github.com/Shopify/sarama"
+	log "github.com/sirupsen/logrus"
+	"io/ioutil"
 	"net/http"
 	"strings"
 	"time"
-	"io/ioutil"
 )
 
-
-type RestProxy struct {
-	RetryConnecting int
-	FlushFrequency time.Duration
-	LogTopic string
-
-	brokerList []string
-	addr string
-
-	dataCollector     sarama.SyncProducer
+type restProxy struct {
+	opt           *RestProxyOpt
+	dataCollector sarama.SyncProducer
 }
 
-func NewRestProxy(brokerList []string) *RestProxy {
-	s := &RestProxy{}
-
-	s.RetryConnecting = 10
-	s.FlushFrequency = 500
-	s.brokerList = brokerList
-
-	return s
+type RestProxyOpt struct {
+	AdvertisedListener string
+	Brokers            []string
+	RetryConnecting    int
 }
 
-func (s *RestProxy) Close() {
+func (opt *RestProxyOpt) init() error {
+	if len(opt.Brokers) < 1 {
+		return errors.New("brokers does not set")
+	}
+
+	if opt.RetryConnecting == 0 {
+		opt.RetryConnecting = 10
+	}
+
+	if opt.AdvertisedListener == "" {
+		opt.AdvertisedListener = "127.0.0.0:8080"
+	}
+
+	return nil
+}
+
+func NewRestProxy(opt *RestProxyOpt) (*restProxy, error) {
+	if err := opt.init(); err != nil {
+		return nil, err
+	}
+
+	return &restProxy{
+		opt: opt,
+	}, nil
+}
+
+func (s *restProxy) Close() {
+	if s.dataCollector == nil {
+		return
+	}
+
 	if err := s.dataCollector.Close(); err != nil {
-		log.Println("Failed to shutdown data collector cleanly ", err)
+		log.WithField("error", err.Error()).Error("kafka producer failed to shutdown data collector cleanly")
 	}
 }
 
-func (s *RestProxy) Handler() http.Handler {
+func (s *restProxy) Handler() http.Handler {
 	return s.withAccessLog(s.collectQueryStringData())
 }
 
-func (s *RestProxy) Run(addr string) error {
-	s.addr = addr
-	s.dataCollector = newDataCollector(s.brokerList, s.RetryConnecting)
+func (s *restProxy) Listen() error {
+	s.dataCollector = newDataCollector(s.opt.Brokers, s.opt.RetryConnecting)
 
 	httpServer := &http.Server{
-		Addr:    addr,
+		Addr:    s.opt.AdvertisedListener,
 		Handler: s.Handler(),
 	}
 
-	log.Printf("Listening for requests on %s...\n", addr)
+	log.Info(fmt.Sprintf("http request listening on %s", s.opt.AdvertisedListener))
+
 	return httpServer.ListenAndServe()
 }
 
-func (s *RestProxy) Restart(brokers []string) error {
+func (s *restProxy) Restart(brokers []string) error {
 	s.Close()
-	return s.Run(s.addr)
+	return s.Listen()
 }
 
-func (s *RestProxy) collectQueryStringData() http.Handler {
+func (s *restProxy) collectQueryStringData() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/topic") {
 			http.NotFound(w, r)
@@ -68,34 +88,42 @@ func (s *RestProxy) collectQueryStringData() http.Handler {
 		}
 
 		uriArray := strings.Split(r.RequestURI, "/")
-		body, err := ioutil.ReadAll(r.Body);
-		partition, offset, err := s.dataCollector.SendMessage(&sarama.ProducerMessage{
-			Topic: uriArray[len(uriArray) - 1],
+		body, err := ioutil.ReadAll(r.Body)
+
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			log.WithField("error", err.Error()).Error("failed to read body")
+		}
+
+		_, _, err = s.dataCollector.SendMessage(&sarama.ProducerMessage{
+			Topic: uriArray[len(uriArray)-1],
 			Value: sarama.StringEncoder(body),
 		})
 
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(w, "Failed to store your data:, %s", err)
-		} else {
-			fmt.Fprintf(w, "Your data is stored with unique identifier important/%d/%d", partition, offset)
+			log.WithField("error", err.Error()).Error("failed to stored")
 		}
 	})
 }
 
-func (s *RestProxy) withAccessLog(next http.Handler) http.Handler {
+func (s *restProxy) withAccessLog(next http.Handler) http.Handler {
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		next.ServeHTTP(w, r)
 
-		log.Printf("%s | %s | %s | %s | %f", r.Method, r.Host, r.RequestURI, r.RemoteAddr,
-			float64(time.Since(started)) / float64(time.Second))
+		log.WithFields(log.Fields{
+			"method":        r.Method,
+			"host":          r.Host,
+			"request":       r.RequestURI,
+			"remote_add":    r.RemoteAddr,
+			"response_time": float64(time.Since(started)) / float64(time.Second),
+		}).Debug("rest api")
 	})
 }
 
 func newDataCollector(brokerList []string, retry int) sarama.SyncProducer {
-
 	config := sarama.NewConfig()
 	config.Producer.Return.Successes = true
 	config.Producer.RequiredAcks = sarama.WaitForLocal
@@ -103,7 +131,7 @@ func newDataCollector(brokerList []string, retry int) sarama.SyncProducer {
 
 	producer, err := sarama.NewSyncProducer(brokerList, config)
 	if err != nil {
-		log.Fatalln("Failed to start Sarama producer:", err)
+		log.WithField("error", err.Error()).Fatal("kafka producer failed to start")
 	}
 
 	return producer
