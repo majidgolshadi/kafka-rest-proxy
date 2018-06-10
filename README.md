@@ -1,24 +1,25 @@
 Kafka rest proxy
 ================
-Stand-alone Kafka rest proxy writen in go.
-Any instance register himself on zookeeper (register namespace is configurable) and connect to any kafka instances.
-you can pass message on `<URI>:<PORT>/topic/<TOPIC_NAME>` uri as message body
+Stand-alone Kafka rest proxy written in go.
+Any instance register himself on zookeeper (register namespace is configurable) and connect to all kafka brokers.
+you can pass your content on `<URI>:<PORT>/topic/<TOPIC_NAME>` uri as message body to put on kafka topics
 
 Options
 -------
-```bash
-  -addr string
-        The address to bind to example 192.168.1.101:8080
-  -logtopic string
-        kafka topic to produce log in (default "kafka_producer_access_log")
-  -proId string
-        Zookeeper namespace to producer register itself in (default "/kafka_producer/")
-  -retry int
-        Retry up to N times to produce the message (default 10)
-  -verbose
-        Turn on Sarama logging
-  -zookeeper string
-        The Kafka brokers to connect to, as a comma separated list example: 192.168.1.101:2181,...
+```toml
+advertised_listener="127.0.0.1:8090" #Optional ip and port that http proxy bind on (default: 0.0.0.0:8080)
+debug_port=":6060"                   #Optional debugging port (default: 6060)
+
+[log]
+format="json"           #text,json (default: text)
+log_level="debug"       #Optiona debug,info,warning,error (default: warning)
+log_point="/directory/path/to/store/logs" #Optional (default: stdout)
+
+[kafka-producer]
+zookeeper="127.0.0.1:2181/kafka"
+zookeeper_timeout=5             #Second
+max_retries=10                  #Optional (default: 10)
+producer_registration_namespace="/kafka-rest-proxy" #Optional (default: /kafka-rest-proxy)
 ```
 
 Benchmark test

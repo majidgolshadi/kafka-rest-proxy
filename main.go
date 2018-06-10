@@ -31,7 +31,7 @@ type KafkaProducer struct {
 
 func (cnf *config) init() {
 	if cnf.AdvertisedListener == "" {
-		cnf.AdvertisedListener = "0.0.0.0:8080"
+		cnf.AdvertisedListener = ":8080"
 	}
 
 	if cnf.DebugPort == "" {
@@ -51,7 +51,7 @@ func (cnf *config) init() {
 	}
 
 	if cnf.KafkaProducer.ProducerRegistrationNamespace == "" {
-		cnf.KafkaProducer.ProducerRegistrationNamespace = "/kafka_producer/"
+		cnf.KafkaProducer.ProducerRegistrationNamespace = "/kafka-rest-proxy/"
 	}
 }
 
