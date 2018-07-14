@@ -4,8 +4,10 @@ Stand-alone Kafka rest proxy written in go.
 Any instance register himself on zookeeper (register namespace is configurable) and connect to all kafka brokers.
 you can pass your content on `<URI>:<PORT>/topic/<TOPIC_NAME>` uri as message body to put on kafka topics
 
-Options
--------
+Configuration
+-------------
+In order to configure service it need to make a `config.toml` file and put it near the application binary
+
 ```toml
 advertised_listener="127.0.0.1:8090" #Optional ip and port that http proxy bind on (default: 0.0.0.0:8080)
 debug_port=":6060"                   #Optional debugging port (default: 6060)
@@ -82,3 +84,22 @@ Percentage of the requests served within a certain time (ms)
   99%     21
  100%    214 (longest request)
 ```
+
+Debugging
+---------
+Debugging rest APIs
+
+- http://`<SERVER_IP>:<debug_port>`/debug/pprof/goroutine
+- http://`<SERVER_IP>:<debug_port>`/debug/pprof/heap
+- http://`<SERVER_IP>:<debug_port>`/debug/pprof/threadcreate
+- http://`<SERVER_IP>:<debug_port>`/debug/pprof/block
+- http://`<SERVER_IP>:<debug_port>`/debug/pprof/mutex
+- http://`<SERVER_IP>:<debug_port>`/debug/pprof/profile
+- http://`<SERVER_IP>:<debug_port>`/debug/pprof/trace?seconds=5
+
+Call `http://<SERVER_IP>:<debug_port>/debug/pprof/trace?seconds=5` to get 5 second of application trace file and then you can see application trace. With
+`go tool trace <DOWNLOADED_FILE_PATH>` command you can see what's happen in application on that period of time
+
+Call `http://<SERVER_IP>:<debug_port>/debug/pprof/profile` to get service profile and then run `go tool pprof <DOWNLOADED_FILE_PATH>` command go see more details about appli   cation processes
+
+To get more information you can see [How to use pprof](https://www.integralist.co.uk/posts/profiling-go/) article
